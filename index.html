@@ -300,12 +300,14 @@ def build_model_py(corpus_text, T, E, Hf):
     params = V*E + T*E + 3*E*E + 2*E + 2*E + (E*Hf+Hf) + (Hf*E+E) + (E*V+V)
     return json.dumps({'vocab': V, 'examples': len(X_list), 'params': int(params)})
 
-async def train_epoch_py(lr, batch_size):
+async def train_epoch_py(lr, batch_size, progress_cb):
     import asyncio, gc
     lr = float(lr); batch_size = max(1,int(batch_size))
     model = STATE['model']; X_all = STATE['X_all']; Y_all = STATE['Y_all']
     perm = np.random.permutation(len(X_all))
     total = 0.0; n = 0
+    n_batches = (len(perm)+batch_size-1)//batch_size
+    b = 0
     for i in range(0, len(perm), batch_size):
         idx = perm[i:i+batch_size]
         ids = X_all[idx]; targets = Y_all[idx]
@@ -314,7 +316,10 @@ async def train_epoch_py(lr, batch_size):
         grads = model.backward(cache, targets)
         model.adam_step(grads, lr)
         total += l; n += 1
+        b += 1
         del cache, grads
+        if progress_cb is not None:
+            progress_cb(b, n_batches)
         await asyncio.sleep(0)
     gc.collect()
     return json.dumps({'loss': total/max(n,1), 'vocab': STATE['V']})
@@ -441,20 +446,28 @@ async function train(){
   const batchSize = parseInt(document.getElementById('batchSize').value);
   const btn = document.getElementById('trainBtn'); btn.disabled = true;
   const bar = document.getElementById('trainProgressBar');
+  const note = document.getElementById('statusNote');
   const t0 = performance.now();
 
-  for(let e=0;e<epochs;e++){
-    const res = JSON.parse(await pyFns.train_epoch_py(lr, batchSize));
-    lossHistory.push(res.loss);
-    document.getElementById('statLoss').textContent = res.loss.toFixed(3) + ' / ' + Math.exp(res.loss).toFixed(1);
-    bar.style.width = Math.round(100*(e+1)/epochs) + '%';
-    drawLossChart();
-    await new Promise(r=>setTimeout(r,0));
+  try{
+    for(let e=0;e<epochs;e++){
+      note.innerHTML = `Training… epoch <b>${e+1}/${epochs}</b>`;
+      const onProgress = (doneBatches, totalBatches) => {
+        bar.style.width = Math.round(100*doneBatches/totalBatches) + '%';
+      };
+      const res = JSON.parse(await pyFns.train_epoch_py(lr, batchSize, onProgress));
+      lossHistory.push(res.loss);
+      document.getElementById('statLoss').textContent = res.loss.toFixed(3) + ' / ' + Math.exp(res.loss).toFixed(1);
+      drawLossChart();
+    }
+    const secs = ((performance.now()-t0)/1000).toFixed(1);
+    note.innerHTML =
+      `Trained ${epochs} more epoch(s) in <b>${secs}s</b>. Loss <b>${lossHistory.at(-1).toFixed(3)}</b>, ` +
+      `perplexity <b>${Math.exp(lossHistory.at(-1)).toFixed(1)}</b> (random baseline: loss ${Math.log(buildStats.vocab).toFixed(2)}, perplexity ${buildStats.vocab}). Train again, or generate below.`;
+  } catch(err){
+    note.innerHTML = `<b style="color:var(--bad);">Training failed:</b> ${err.message || err}. Try a smaller architecture, or reload the page and rebuild.`;
+    console.error(err);
   }
-  const secs = ((performance.now()-t0)/1000).toFixed(1);
-  document.getElementById('statusNote').innerHTML =
-    `Trained ${epochs} more epoch(s) in <b>${secs}s</b>. Loss <b>${lossHistory.at(-1).toFixed(3)}</b>, ` +
-    `perplexity <b>${Math.exp(lossHistory.at(-1)).toFixed(1)}</b> (random baseline: loss ${Math.log(buildStats.vocab).toFixed(2)}, perplexity ${buildStats.vocab}). Train again, or generate below.`;
   btn.disabled = false;
 }
 
