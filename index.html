@@ -301,7 +301,7 @@ def build_model_py(corpus_text, T, E, Hf):
     return json.dumps({'vocab': V, 'examples': len(X_list), 'params': int(params)})
 
 async def train_epoch_py(lr, batch_size):
-    import asyncio
+    import asyncio, gc
     lr = float(lr); batch_size = max(1,int(batch_size))
     model = STATE['model']; X_all = STATE['X_all']; Y_all = STATE['Y_all']
     perm = np.random.permutation(len(X_all))
@@ -314,7 +314,9 @@ async def train_epoch_py(lr, batch_size):
         grads = model.backward(cache, targets)
         model.adam_step(grads, lr)
         total += l; n += 1
+        del cache, grads
         await asyncio.sleep(0)
+    gc.collect()
     return json.dumps({'loss': total/max(n,1), 'vocab': STATE['V']})
 
 def seed_to_window_py(seed_text, T):
@@ -369,8 +371,7 @@ def generate_step_py(window_json, temp, top_k, top_p, rep_penalty, recent_json, 
 let pyodide = null;
 let lossHistory = [];
 let buildStats = null;
-
-function py(name){ return pyodide.globals.get(name); }
+let pyFns = {}; // cache function references once instead of re-fetching every call
 
 async function boot(){
   const bootText = document.getElementById('bootText');
@@ -388,6 +389,14 @@ async function boot(){
     const pySrc = document.getElementById('pysrc').textContent;
     await pyodide.runPythonAsync(pySrc);
 
+    // Cache these once — repeatedly calling pyodide.globals.get() creates a new
+    // reference wrapper every time, which adds unnecessary memory pressure over
+    // a long session. WASM memory can only grow, never shrink back, so avoiding
+    // needless allocation matters more here than in a normal JS/Python program.
+    for(const name of ['build_model_py','train_epoch_py','seed_to_window_py','generate_step_py']){
+      pyFns[name] = pyodide.globals.get(name);
+    }
+
     document.getElementById('bootBanner').style.display = 'none';
     document.getElementById('buildBtn').disabled = false;
     document.getElementById('resetBtn').disabled = false;
@@ -404,7 +413,7 @@ async function buildModel(){
   const E = parseInt(document.getElementById('embDim').value);
   const Hf = parseInt(document.getElementById('ffnDim').value);
 
-  const res = JSON.parse(await py('build_model_py')(corpus, T, E, Hf));
+  const res = JSON.parse(await pyFns.build_model_py(corpus, T, E, Hf));
   if(res.error){ alert(res.error); return; }
   buildStats = res;
   lossHistory = [];
@@ -414,8 +423,14 @@ async function buildModel(){
   document.getElementById('statLoss').textContent = Math.log(res.vocab).toFixed(2) + ' / ' + res.vocab;
   document.getElementById('trainBtn').disabled = false;
   document.getElementById('genBtn').disabled = false;
+
+  const memWarning = res.params > 200000
+    ? ` <b style="color:var(--bad);">⚠ Over ~200k params: WASM memory only grows, never shrinks, and mobile Safari's per-tab ceiling is tight — this size risks freezing the tab. Lower block size or embed dim, or use desktop Safari, which has much more headroom.</b>`
+    : (res.params > 100000
+        ? ` <b style="color:var(--amber);">Getting large for mobile Safari — if it freezes, lower block size or embed dim first.</b>`
+        : '');
   document.getElementById('statusNote').innerHTML =
-    `Built: <b>${res.vocab}</b> vocab, block size <b>${T}</b>, <b>${res.examples}</b> training windows, <b>${res.params.toLocaleString()}</b> params. Loss ≈ <b>${Math.log(res.vocab).toFixed(2)}</b> (random). Click train.`;
+    `Built: <b>${res.vocab}</b> vocab, block size <b>${T}</b>, <b>${res.examples}</b> training windows, <b>${res.params.toLocaleString()}</b> params. Loss ≈ <b>${Math.log(res.vocab).toFixed(2)}</b> (random). Click train.${memWarning}`;
   document.getElementById('genOut').innerHTML = '<span class="seed">Trained output will appear here…</span>';
   drawLossChart(); drawAttention(null);
 }
@@ -429,7 +444,7 @@ async function train(){
   const t0 = performance.now();
 
   for(let e=0;e<epochs;e++){
-    const res = JSON.parse(await py('train_epoch_py')(lr, batchSize));
+    const res = JSON.parse(await pyFns.train_epoch_py(lr, batchSize));
     lossHistory.push(res.loss);
     document.getElementById('statLoss').textContent = res.loss.toFixed(3) + ' / ' + Math.exp(res.loss).toFixed(1);
     bar.style.width = Math.round(100*(e+1)/epochs) + '%';
@@ -468,7 +483,7 @@ async function generate(){
   const stopWord = (document.getElementById('stopToken').value||'').trim().toLowerCase();
   const T = parseInt(document.getElementById('blockSize').value);
 
-  let window_ = JSON.parse(await py('seed_to_window_py')(seedRaw, T));
+  let window_ = JSON.parse(await pyFns.seed_to_window_py(seedRaw, T));
 
   const outEl = document.getElementById('genOut');
   outEl.innerHTML = `<span class="seed">${seedRaw?seedRaw+' ':''}</span><span id="genStream"></span><span class="cursor">&nbsp;</span>`;
@@ -478,7 +493,7 @@ async function generate(){
   const recent = [];
   let stoppedEarly = false;
   for(let step=0; step<len; step++){
-    const res = JSON.parse(await py('generate_step_py')(
+    const res = JSON.parse(await pyFns.generate_step_py(
       JSON.stringify(window_), temp, k, p, repPen, JSON.stringify(recent.slice(-6)), stopWord
     ));
 
