@@ -97,6 +97,16 @@ question: thank you. answer: you are welcome.
 question: goodbye. answer: goodbye, thank you for talking with me.</textarea>
 
     <div class="row">
+      <div class="field" style="flex:1.4;min-width:170px;"><label>hf dataset (e.g. roneneldan/TinyStories)</label><input id="hfDataset" type="text" placeholder="roneneldan/TinyStories" style="width:100%;"></div>
+      <div class="field" style="flex:1;min-width:100px;"><label>config (optional)</label><input id="hfConfig" type="text" placeholder="auto" style="width:100%;"></div>
+      <div class="field"><label>split</label><input id="hfSplit" type="text" value="train" style="width:90px;"></div>
+      <div class="field"><label>text field</label><input id="hfField" type="text" value="text" style="width:90px;"></div>
+      <div class="field"><label>max chars</label><input id="hfMaxChars" type="number" value="4000" min="200" max="20000" style="width:90px;"></div>
+    </div>
+    <div class="row">
+      <button class="ghost" id="hfFetchBtn">↓ pull sample into corpus</button>
+    </div>
+    <p class="note" id="hfNote">Pulls a capped, truncated sample of real text from a public Hugging Face dataset — via their free, no-auth <code>datasets-server.huggingface.co</code> API — straight into the corpus box above. This is a small sample for a small model, not full dataset training: keep <b>max chars</b> low (a few thousand) or vocab/memory will blow past the limits already discussed. Good starter datasets with a plain <code>text</code> field: <code>roneneldan/TinyStories</code>, <code>stanfordnlp/imdb</code> (config <code>plain_text</code>), <code>wikitext</code> (config <code>wikitext-2-raw-v1</code>).</p>
       <div class="field"><label>block size</label><input id="blockSize" type="number" value="8" min="2" max="24"></div>
       <div class="field"><label>embed dim</label><input id="embDim" type="number" value="24" min="4" max="96"></div>
       <div class="field"><label>ffn hidden</label><input id="ffnDim" type="number" value="48" min="4" max="192"></div>
@@ -566,10 +576,65 @@ function drawAttention(activity){
   g.fillText('next token', targetX-58, targetY-12);
 }
 
+async function fetchFromHF(){
+  const btn = document.getElementById('hfFetchBtn');
+  const note = document.getElementById('hfNote');
+  const datasetId = document.getElementById('hfDataset').value.trim();
+  let config = document.getElementById('hfConfig').value.trim();
+  let split = document.getElementById('hfSplit').value.trim() || 'train';
+  const field = document.getElementById('hfField').value.trim() || 'text';
+  const maxChars = Math.min(parseInt(document.getElementById('hfMaxChars').value) || 4000, 20000);
+
+  if(!datasetId){ note.innerHTML = '<b style="color:var(--bad);">Enter a dataset id first, e.g. roneneldan/TinyStories.</b>'; return; }
+
+  btn.disabled = true;
+  note.textContent = 'Looking up dataset…';
+  try{
+    if(!config){
+      const sres = await fetch(`https://datasets-server.huggingface.co/splits?dataset=${encodeURIComponent(datasetId)}`);
+      if(!sres.ok) throw new Error(`Could not find dataset "${datasetId}" (HTTP ${sres.status}). Check the exact id on huggingface.co/datasets.`);
+      const sdata = await sres.json();
+      if(!sdata.splits || !sdata.splits.length) throw new Error('No splits found for this dataset.');
+      const match = sdata.splits.find(s=>s.split===split) || sdata.splits[0];
+      config = match.config; split = match.split;
+    }
+
+    let text = '';
+    let offset = 0;
+    const pageSize = 100, maxPages = 15;
+    for(let page=0; page<maxPages && text.length < maxChars; page++){
+      note.textContent = `Fetching rows ${offset}–${offset+pageSize}…`;
+      const url = `https://datasets-server.huggingface.co/rows?dataset=${encodeURIComponent(datasetId)}&config=${encodeURIComponent(config)}&split=${encodeURIComponent(split)}&offset=${offset}&length=${pageSize}`;
+      const rres = await fetch(url);
+      if(!rres.ok) throw new Error(`Row fetch failed (HTTP ${rres.status}). Check config "${config}" / split "${split}" on the dataset's page.`);
+      const rdata = await rres.json();
+      if(!rdata.rows || !rdata.rows.length) break;
+      for(const r of rdata.rows){
+        const val = r.row ? r.row[field] : undefined;
+        if(typeof val === 'string') text += ' ' + val;
+        if(text.length >= maxChars) break;
+      }
+      offset += pageSize;
+    }
+
+    text = text.trim();
+    if(!text) throw new Error(`No text found in field "${field}" — check the exact column name on the dataset's page on huggingface.co.`);
+    text = text.slice(0, maxChars);
+
+    document.getElementById('corpus').value = text;
+    note.innerHTML = `Pulled <b>${text.length.toLocaleString()}</b> characters from <b>${datasetId}</b> (config "${config}", split "${split}") into the corpus box. Click <b>1 · build network</b> to use it.`;
+  } catch(err){
+    note.innerHTML = `<b style="color:var(--bad);">${err.message}</b>`;
+    console.error(err);
+  }
+  btn.disabled = false;
+}
+
 document.getElementById('buildBtn').addEventListener('click', buildModel);
 document.getElementById('trainBtn').addEventListener('click', train);
 document.getElementById('genBtn').addEventListener('click', generate);
 document.getElementById('resetBtn').addEventListener('click', ()=>{ if(buildStats) buildModel(); });
+document.getElementById('hfFetchBtn').addEventListener('click', fetchFromHF);
 window.addEventListener('resize', ()=>{ if(lossHistory.length) drawLossChart(); });
 
 boot();
